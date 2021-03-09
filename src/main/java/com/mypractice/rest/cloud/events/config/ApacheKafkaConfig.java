@@ -13,15 +13,16 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.RecoverableDataAccessException;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
 import org.springframework.kafka.listener.ContainerProperties;
-import org.springframework.retry.backoff.FixedBackOffPolicy;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 
 
 @Slf4j
@@ -32,6 +33,7 @@ public class ApacheKafkaConfig {
 
     @Value("${spring.kafka.consumer.group-id}")
     private String groupId;
+
     @Bean
     public Map<String, Object> consumerConfigs() {
         Map<String, Object> props = new HashMap<>();
@@ -43,6 +45,7 @@ public class ApacheKafkaConfig {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         return props;
     }
+
     @Bean
     public ConsumerFactory consumerFactory() {
         return new DefaultKafkaConsumerFactory<>(
@@ -58,17 +61,37 @@ public class ApacheKafkaConfig {
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.setRetryTemplate(kafkaRetry());
         factory.setConsumerFactory(consumerFactory());
+        factory.setErrorHandler(((exception, data) -> {
+            /* here you can do you custom handling, I am just logging it same as default Error handler does
+If you just want to log. you need not configure the error handler here. The default handler does it for you.
+Generally, you will persist the failed records to DB for tracking the failed records.  */
+            log.error("Error in process with Exception {} and the record is {}", exception, data);
+        }));
+        factory.setRecoveryCallback((context -> {
+            if(context.getLastThrowable().getCause() instanceof RecoverableDataAccessException){
+                //here you can do your recovery mechanism where you can put back on to the topic using a Kafka producer
+            } else{
+                // here you can log things and throw some custom exception that Error handler will take care of ..
+                throw new RuntimeException(context.getLastThrowable().getMessage());
+            }
+            return null;
+
+        }));
         return factory;
     }
+
     public RetryTemplate kafkaRetry() {
         RetryTemplate retryTemplate = new RetryTemplate();
-        FixedBackOffPolicy fixedBackOffPolicy = new FixedBackOffPolicy();
-        fixedBackOffPolicy.setBackOffPeriod(10 * 1000l);
-        retryTemplate.setBackOffPolicy(fixedBackOffPolicy);
-        SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy();
-        retryPolicy.setMaxAttempts(3);
-        retryTemplate.setRetryPolicy(retryPolicy);
+        retryTemplate.setRetryPolicy(getSimpleRetryPolicy());
         return retryTemplate;
+    }
+
+    private SimpleRetryPolicy getSimpleRetryPolicy() {
+        Map<Class<? extends Throwable>, Boolean> exceptionMap = new HashMap<>();
+        exceptionMap.put(IllegalArgumentException.class, false);
+        exceptionMap.put(TimeoutException.class, true);
+
+        return new SimpleRetryPolicy(3,exceptionMap,true);
     }
 
 
@@ -78,8 +101,10 @@ public class ApacheKafkaConfig {
         configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, CloudEventSerializer.class);
-        configProps.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "True");
+        configProps.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         configProps.put(ProducerConfig.RETRIES_CONFIG, 3);
+        configProps.put(ProducerConfig.ACKS_CONFIG, "all");
+
         configProps.put(CloudEventSerializer.ENCODING_CONFIG, Encoding.BINARY);
         configProps.put(CloudEventSerializer.EVENT_FORMAT_CONFIG, JsonFormat.CONTENT_TYPE);
         return new DefaultKafkaProducerFactory<>(configProps);
