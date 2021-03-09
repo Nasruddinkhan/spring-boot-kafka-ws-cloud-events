@@ -57,7 +57,7 @@ public class MainResource {
                 .withData(PojoCloudEventData.wrap(user, objectMapper::writeValueAsBytes))
                 .build();
         log.info("outputEvent=> {}", objectMapper.writeValueAsString(outputEvent));
-        dynamicProducer.sendMessage(user, "kafkacloud.in");
+        dynamicProducer.sendMessage(outputEvent, "kafkacloud.in");
         return Response.ok(outputEvent).build();
     }
 }
